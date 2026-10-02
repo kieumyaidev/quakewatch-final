@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>QuakeWatch Final Project Report</title>
+<style>
+  @page { size: A4; margin: 14mm 16mm; }
+  body { font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; font-size: 10pt; line-height: 1.4; color: #1a1a1a; }
+  h1 { font-size: 20pt; margin: 0 0 2px; }
+  .sub { color: #555; margin: 0 0 18px; }
+  h2 { font-size: 13pt; margin: 16px 0 6px; border-bottom: 1px solid #ccc; padding-bottom: 3px; }
+  h3 { font-size: 11pt; margin: 12px 0 4px; }
+  p { margin: 4px 0 8px; }
+  ul { margin: 4px 0 8px; padding-left: 20px; }
+  li { margin: 2px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 6px 0 10px; font-size: 9.5pt; }
+  th, td { border: 1px solid #ccc; padding: 4px 6px; text-align: left; vertical-align: top; }
+  th { background: #f2f2f2; }
+  pre { font-size: 8.5pt; line-height: 1.25; background: #f7f7f7; border: 1px solid #ddd; padding: 8px; page-break-inside: avoid; }
+  code { font-family: Menlo, monospace; font-size: 9pt; }
+  .avoid { page-break-inside: avoid; }
+</style>
+</head>
+<body>
+
+<h1>QuakeWatch</h1>
+<p class="sub">CSCA 5028 Final Project Report: earthquake data collector, analyzer and search app</p>
+
+<h2>1. Purpose</h2>
+<p>QuakeWatch collects earthquake data from the public USGS API, stores it, analyzes it per region and shows the results on a small web site. USGS already publishes the data, but only as raw feeds that cover a short time window. QuakeWatch keeps its own history in a database, so a user can type a place (for example "Alaska") and see recent earthquakes there, or open the region report to compare activity between regions. Target users are people living in active areas, travelers and students who want a simple view without a map-heavy tool.</p>
+
+<h2>2. System requirements</h2>
+<h3>Functional requirements</h3>
+<ul>
+  <li>Collect earthquakes from the USGS GeoJSON feed on a schedule (default every 15 minutes) without creating duplicates.</li>
+  <li>Store each earthquake (id, magnitude, place, region, time, coordinates, depth, link) in a relational database.</li>
+  <li>After each collection, compute per-region stats: number of earthquakes, max and average magnitude, latest time.</li>
+  <li>Web page with a search form that echoes the user input and lists matching earthquakes (by place or region).</li>
+  <li>Report page with the region stats.</li>
+  <li>JSON API for search and stats, so other services can use the data.</li>
+  <li>Health check and metrics endpoints for monitoring.</li>
+</ul>
+<h3>Non-functional requirements</h3>
+<ul>
+  <li><b>Reliability:</b> a failed USGS call must not break the app. The worker logs the error, counts it in metrics and retries on the next tick. An event is only marked done after the analyzer finishes, so a crash doesn't lose it.</li>
+  <li><b>Loose coupling:</b> collector and analyzer communicate only through a message queue, and the web app only reads from the database. Each part can be changed or scaled on its own.</li>
+  <li><b>Security:</b> user input is escaped by the template engine and SQL uses bound parameters (no string building).</li>
+  <li><b>Performance:</b> search uses an index on <code>occurred_at</code> and a row limit. The data size is small (a few hundred rows per day), so one small instance is enough.</li>
+  <li><b>Cost:</b> runs on free hosting tiers.</li>
+</ul>
+<h3>Software and runtime requirements</h3>
+<table>
+  <tr><th>Item</th><th>Version / choice</th></tr>
+  <tr><td>Language</td><td>Python 3.12</td></tr>
+  <tr><td>Web framework</td><td>Flask 3, served by gunicorn</td></tr>
+  <tr><td>Database</td><td>PostgreSQL 14+ in production and CI; SQLite for local work and unit tests</td></tr>
+  <tr><td>Messaging</td><td>RabbitMQ 3.10+ (via pika); falls back to a database queue table when <code>RABBIT_URL</code> is not set</td></tr>
+  <tr><td>Monitoring</td><td>prometheus-client (<code>/metrics</code>), <code>/health</code>, structured logs</td></tr>
+  <tr><td>Testing</td><td>pytest, responses (HTTP mocking), unittest.mock</td></tr>
+  <tr><td>CI/CD</td><td>GitHub Actions, Render deploy hook</td></tr>
+  <tr><td>Hosting</td><td>Render web service (Docker) and Render PostgreSQL</td></tr>
+</table>
+
+<h2 class="avoid">3. Architecture</h2>
+<pre>
+  Browser / API client
+          |  HTTP: /  /stats  /api/*  /health  /metrics
+          v
+  +----------------------------+      SQL read      +-----------------------+
+  | Web app (Flask + gunicorn) | -----------------> | PostgreSQL            |
+  +----------------------------+                    |  - earthquakes        |
+                                                    |  - region_stats       |
+  +----------------------------+   insert/update    |  - messages (fallback)|
+  | Collector (scheduled)      | -----------------> |  - schema_migrations  |
+  +----------------------------+                    +-----------------------+
+     |              |                                          ^
+     | HTTPS GET    | publish "earthquakes-collected"          | write stats
+     v              v                                          |
+  +----------+   +----------------+     consume     +----------+------------+
+  | USGS API |   | RabbitMQ queue | --------------> | Analyzer              |
+  +----------+   +----------------+                 +-----------------------+
+</pre>
+<p>The worker process runs the collector on a schedule and hands queued events to the analyzer. In production on the free tier the worker runs as a background thread inside the web process (<code>RUN_WORKER=true</code>), because a separate worker service is not free. The code also allows it to run as its own process (<code>python -m quakewatch.worker</code>).</p>
+
+<h2>4. Design decisions</h2>
+<table>
+  <tr><th style="width:24%">Decision</th><th>Reason</th></tr>
+  <tr><td>USGS GeoJSON feed as data source</td><td>Public, no API key, updated every minute, stable format. Good for a scheduled collector.</td></tr>
+  <tr><td>Relational database (PostgreSQL)</td><td>The data is structured and the analysis is a GROUP BY query. Postgres is free on Render and in CI. SQLite is used locally so the project runs with no setup.</td></tr>
+  <tr><td>Plain SQL migrations with a small runner</td><td>Five migration files, tracked in <code>schema_migrations</code>. Easier to read than an ORM migration tool for a project this size. One placeholder handles the auto-increment difference between SQLite and Postgres.</td></tr>
+  <tr><td>Event collaboration between collector and analyzer</td><td>The collector doesn't need to know about the analyzer. It publishes an event and the analyzer reacts. New consumers (for example an alert service for large earthquakes) can be added without changing the collector.</td></tr>
+  <tr><td>RabbitMQ with a database queue fallback</td><td>RabbitMQ is used when available (CI, local docker compose). The free hosting has no managed RabbitMQ, so the same <code>MessageQueue</code> interface also has a database-table version. Both use manual acknowledgement: a message is only removed after the handler succeeds.</td></tr>
+  <tr><td>Analyzer recomputes all stats each run</td><td>Simple and always correct, and fast at this data size. If data grows, it can switch to incremental updates.</td></tr>
+  <tr><td>Region parsed from the place text</td><td>USGS has no region field. The text after the last comma ("..., Alaska") works for most rows. State codes like "CA" are mapped to full names.</td></tr>
+  <tr><td>Server-rendered pages plus a JSON API</td><td>Server-rendered HTML keeps the front end small and safe (auto escaping). The JSON API provides REST collaboration for other clients.</td></tr>
+  <tr><td>Prometheus metrics and health check</td><td>Metrics show collected count, failures, last collection time, analyzer runs and request latency. <code>/health</code> also checks the database and is used by Render to restart the service.</td></tr>
+  <tr><td>Docker image for deployment</td><td>The same image runs locally and on Render, so the production environment matches what was tested.</td></tr>
+</table>
+
+<h2>5. Rubric coverage</h2>
+<table>
+  <tr><th style="width:30%">Rubric item</th><th>Where in the project</th></tr>
+  <tr><td>Web application (form and reporting)</td><td><code>quakewatch/app.py</code>, search page <code>/</code> and region report <code>/stats</code></td></tr>
+  <tr><td>Data collection</td><td><code>quakewatch/collector.py</code></td></tr>
+  <tr><td>Data analyzer</td><td><code>quakewatch/analyzer.py</code></td></tr>
+  <tr><td>Unit tests</td><td><code>tests/unit/</code> (26 tests)</td></tr>
+  <tr><td>Data persistence</td><td>PostgreSQL / SQLite, <code>quakewatch/db.py</code>, <code>migrations/</code></td></tr>
+  <tr><td>REST collaboration / API endpoint</td><td><code>/api/earthquakes</code>, <code>/api/stats</code>; collector calls the USGS REST API</td></tr>
+  <tr><td>Product environment</td><td><code>Dockerfile</code>, <code>render.yaml</code> (web service and Postgres on Render)</td></tr>
+  <tr><td>Integration tests</td><td><code>tests/integration/test_pipeline.py</code>: real HTTP feed server, Postgres, RabbitMQ and the web app on a real port</td></tr>
+  <tr><td>Mock objects / test doubles</td><td><code>responses</code> mocks the USGS API, <code>unittest.mock</code> in worker tests, fake publisher in collector tests</td></tr>
+  <tr><td>Continuous integration</td><td><code>.github/workflows/ci.yml</code>, job <code>test</code> with Postgres and RabbitMQ services</td></tr>
+  <tr><td>Production monitoring</td><td><code>/metrics</code> (Prometheus), <code>/health</code>, logs</td></tr>
+  <tr><td>Event collaboration / messaging</td><td><code>quakewatch/messaging.py</code>, event <code>earthquakes-collected</code></td></tr>
+  <tr><td>Continuous delivery</td><td>Job <code>deploy</code> in the CI workflow calls the Render deploy hook after tests pass on <code>main</code></td></tr>
+</table>
+
+<h2>6. Testing</h2>
+<p>Unit tests run on SQLite with the USGS API mocked, so they are fast and need no network. They cover parsing, saving without duplicates, event publishing, region parsing, the analyzer, the database queue (order, single delivery, message kept when the handler fails), the worker schedule and retry, and every web endpoint, including escaping of user input. The integration test runs the whole flow (collect, publish, consume, analyze, serve over HTTP) against real Postgres and RabbitMQ when <code>DATABASE_URL</code> and <code>RABBIT_URL</code> are set, as they are in CI. I also ran the app with real USGS data: one collection saved 291 earthquakes, and the analyzer produced stats for 24 regions.</p>
+
+<h2>7. Limitations and next steps</h2>
+<ul>
+  <li>On the free tier the worker runs inside the web process, and Render puts free services to sleep after inactivity, so collection pauses while the site is idle. A paid worker or cron service would fix this.</li>
+  <li>Region parsing from text is approximate for offshore places.</li>
+  <li>Next features: alerts for large earthquakes as a second event consumer, and charts of daily counts per region.</li>
+</ul>
+
+</body>
+</html>

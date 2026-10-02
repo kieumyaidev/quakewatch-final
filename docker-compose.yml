@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:14.3
+    environment:
+      POSTGRES_USER: quakewatch
+      POSTGRES_PASSWORD: quakewatch
+      POSTGRES_DB: quakewatch
+    ports:
+      - "5433:5432"
+  rabbitmq:
+    image: rabbitmq:3.10.5-management
+    ports:
+      - "5673:5672"
+      - "15673:15672"

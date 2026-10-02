@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+  <p>Earthquakes per region, computed by the analyzer after each collection.</p>
+  {% if stats %}
+    <table>
+      <tr><th>Region</th><th>Count</th><th>Max magnitude</th><th>Avg magnitude</th><th>Latest (UTC)</th></tr>
+      {% for s in stats %}
+        <tr>
+          <td>{{ s.region }}</td>
+          <td>{{ s.quake_count }}</td>
+          <td>{{ s.max_magnitude }}</td>
+          <td>{{ "%.2f"|format(s.avg_magnitude) if s.avg_magnitude is not none else "" }}</td>
+          <td>{{ s.last_occurred_at }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+  {% else %}
+    <p>No stats yet. The analyzer runs after the first collection.</p>
+  {% endif %}
+{% endblock %}

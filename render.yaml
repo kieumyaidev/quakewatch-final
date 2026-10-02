@@ -1,0 +1,22 @@
+databases:
+  - name: quakewatch-db
+    plan: free
+    databaseName: quakewatch
+    user: quakewatch
+
+services:
+  - type: web
+    name: quakewatch
+    runtime: docker
+    plan: free
+    autoDeploy: false
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: quakewatch-db
+          property: connectionString
+      - key: RUN_WORKER
+        value: "true"
+      - key: COLLECT_EVERY_SECONDS
+        value: "900"

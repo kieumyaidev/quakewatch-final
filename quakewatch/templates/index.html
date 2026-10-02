@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+  <p>Search recent earthquakes by place (for example: Alaska, Japan, California).</p>
+  <form method="get" action="/">
+    <input name="q" value="{{ query }}" placeholder="Enter a place">
+    <button type="submit">Search</button>
+  </form>
+
+  {% if query %}
+    <p id="echo">You searched for: <strong>{{ query }}</strong></p>
+    {% if results %}
+      <table>
+        <tr><th>Magnitude</th><th>Place</th><th>Time (UTC)</th></tr>
+        {% for r in results %}
+          <tr>
+            <td>{{ r.magnitude }}</td>
+            <td><a href="{{ r.url }}">{{ r.place }}</a></td>
+            <td>{{ r.occurred_at }}</td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% else %}
+      <p>No earthquakes found for that place yet.</p>
+    {% endif %}
+  {% endif %}
+{% endblock %}
